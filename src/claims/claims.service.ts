@@ -10,9 +10,9 @@ import { RecordClaimDto } from './dto/record-claim.dto';
 export class ClaimsService {
   constructor(private readonly claimsRepository: ClaimsRepository) {}
   private readonly langGraphBaseUrl =
-    process.env.LANGGRAPH_BASE_URL ;
+    process.env.LANGGRAPH_BASE_URL || 'http://127.0.0.1:2024';
   private readonly graphId =
-    process.env.LANGGRAPH_GRAPH_ID ;
+    process.env.LANGGRAPH_GRAPH_ID || 'claims_adjudication';
 
   async submitClaim(dto: ClaimSubmissionDto) {
     const mapped = await this.adjudicateClaim(dto);
@@ -29,7 +29,11 @@ export class ClaimsService {
 
     try {
       const thread = await client.threads.create();
-      const result = await client.runs.wait(thread.thread_id, this.graphId, {
+      const threadId = thread.thread_id;
+      if (!threadId) {
+        throw new Error('LangGraph did not return a thread id');
+      }
+      const result = await client.runs.wait(threadId, this.graphId, {
         input: { submission: dto },
       });
 
