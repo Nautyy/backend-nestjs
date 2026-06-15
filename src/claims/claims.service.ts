@@ -10,9 +10,9 @@ import { RecordClaimDto } from './dto/record-claim.dto';
 export class ClaimsService {
   constructor(private readonly claimsRepository: ClaimsRepository) {}
   private readonly langGraphBaseUrl =
-    process.env.LANGGRAPH_BASE_URL || 'http://127.0.0.1:2024';
+    process.env.LANGGRAPH_BASE_URL ;
   private readonly graphId =
-    process.env.LANGGRAPH_GRAPH_ID || 'claims_adjudication';
+    process.env.LANGGRAPH_GRAPH_ID ;
 
   async submitClaim(dto: ClaimSubmissionDto) {
     const mapped = await this.adjudicateClaim(dto);
@@ -173,19 +173,38 @@ ${contextJson}`;
   }
 
   private mapLangGraphOutput(result: unknown): AdjudicationResult {
-    const raw = result as Record<string, unknown>;
-    const data = (raw?.claim_id ? raw : {}) as Record<string, unknown>;
+    const data = this.extractAdjudicationState(result);
 
     return {
-      claim_id: data.claim_id,
+      claim_id: String(data.claim_id ?? 'UNKNOWN'),
       decision: data.decision,
-      approved_amount: data.approved_amount,
-      reason: data.reason,
-      confidence_score: data.confidence_score,
+      approved_amount: Number(data.approved_amount ?? 0),
+      reason: String(data.reason ?? ''),
+      confidence_score: Number(data.confidence_score ?? 1),
       execution_trace: (data.execution_trace as unknown[]) ?? [],
       rejection_reasons: (data.rejection_reasons as unknown[]) ?? [],
       line_item_decisions: (data.line_item_decisions as unknown[]) ?? [],
       financial_breakdown: (data.financial_breakdown as Record<string, unknown>) ?? {},
     };
+  }
+
+  /** LangGraph SDK may return flat state or nested { values: ... }. */
+  private extractAdjudicationState(result: unknown): Record<string, unknown> {
+    const raw = result as Record<string, unknown>;
+    if (!raw || typeof raw !== 'object') {
+      return {};
+    }
+    if (raw.claim_id) {
+      return raw;
+    }
+    const values = raw.values as Record<string, unknown> | undefined;
+    if (values?.claim_id) {
+      return values;
+    }
+    const output = raw.output as Record<string, unknown> | undefined;
+    if (output?.claim_id) {
+      return output;
+    }
+    return raw;
   }
 }
