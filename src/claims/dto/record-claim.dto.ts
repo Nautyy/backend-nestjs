@@ -37,4 +37,12 @@ export class RecordClaimDto {
   @IsOptional()
   @IsObject()
   financial_breakdown?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsString()
+  member_note?: string;
+
+  @IsOptional()
+  @IsString()
+  case_id?: string;
 }

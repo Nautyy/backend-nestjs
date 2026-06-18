@@ -50,6 +50,22 @@ export class ClaimRecord {
   @Prop({ type: Object, default: {} })
   financial_breakdown!: Record<string, unknown>;
 
+  @Prop()
+  member_note?: string;
+
+  @Prop({ default: false })
+  ops_approved?: boolean;
+
+  @Prop()
+  ops_approved_at?: Date;
+
+  @Prop()
+  ops_approval_note?: string;
+
+  /** Assignment / OCR scenario id when run from test lab (e.g. TC001, OCR-003) */
+  @Prop({ index: true })
+  case_id?: string;
+
   submitted_at?: Date;
 }
 

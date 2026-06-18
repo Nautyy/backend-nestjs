@@ -5,14 +5,17 @@ import { buildChatContext } from './claim-chat-context.util';
 import { ClaimChatDto } from './dto/claim-chat.dto';
 import { ClaimSubmissionDto } from './dto/claim-submission.dto';
 import { RecordClaimDto } from './dto/record-claim.dto';
+import { ApproveClaimDto } from './dto/approve-claim.dto';
 
 @Injectable()
 export class ClaimsService {
   constructor(private readonly claimsRepository: ClaimsRepository) {}
-  private readonly langGraphBaseUrl =
-    process.env.LANGGRAPH_BASE_URL || 'http://127.0.0.1:2024';
+  private readonly langGraphBaseUrl = (
+    process.env.LANGGRAPH_BASE_URL || 'http://127.0.0.1:2024'
+  ).replace(/\/$/, '');
   private readonly graphId =
     process.env.LANGGRAPH_GRAPH_ID || 'claims_adjudication';
+  private readonly langGraphTimeoutMs = Number(process.env.LANGGRAPH_TIMEOUT_MS || 120000);
 
   async submitClaim(dto: ClaimSubmissionDto) {
     const mapped = await this.adjudicateClaim(dto);
@@ -25,22 +28,39 @@ export class ClaimsService {
   }
 
   async adjudicateClaim(dto: ClaimSubmissionDto) {
-    const client = new Client({ apiUrl: this.langGraphBaseUrl });
+    const submission = JSON.parse(JSON.stringify(dto)) as ClaimSubmissionDto;
+    const client = new Client({
+      apiUrl: this.langGraphBaseUrl,
+      timeoutMs: this.langGraphTimeoutMs,
+    });
 
     try {
       const thread = await client.threads.create();
-      const threadId = thread.thread_id;
-      if (!threadId) {
-        throw new Error('LangGraph did not return a thread id');
-      }
-      const result = await client.runs.wait(threadId, this.graphId, {
-        input: { submission: dto },
+      const result = await client.runs.wait(thread.thread_id, this.graphId, {
+        input: { submission },
       });
 
-      return this.mapLangGraphOutput(result);
+      const mapped = this.mapLangGraphOutput(result);
+      if (!mapped.claim_id || mapped.claim_id === 'UNKNOWN') {
+        throw new Error(
+          `LangGraph returned an empty response. Check agent at ${this.langGraphBaseUrl} and graph id "${this.graphId}".`,
+        );
+      }
+
+      if (submission.case_id?.trim()) {
+        try {
+          await this.claimsRepository.saveClaim(submission, mapped);
+        } catch (saveError) {
+          console.error('Failed to persist test case run to MongoDB:', saveError);
+        }
+      }
+
+      return mapped;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'LangGraph invoke failed';
-      throw new ServiceUnavailableException(message);
+      throw new ServiceUnavailableException(
+        `${message} (agent: ${this.langGraphBaseUrl})`,
+      );
     }
   }
 
@@ -62,7 +82,11 @@ export class ClaimsService {
       financial_breakdown: dto.financial_breakdown ?? {},
     };
 
-    await this.claimsRepository.saveClaim(dto.submission, result);
+    await this.claimsRepository.saveClaim(
+      { ...dto.submission, ...(dto.case_id ? { case_id: dto.case_id } : {}) },
+      result,
+      dto.member_note,
+    );
     return this.getClaimById(dto.claim_id);
   }
 
@@ -138,9 +162,32 @@ ${contextJson}`;
     }
   }
 
-  async getClaimHistory(decision?: string, limit?: number) {
-    const records = await this.claimsRepository.findHistory({ decision, limit });
+  async approveClaim(dto: ApproveClaimDto) {
+    const record = await this.claimsRepository.findByClaimId(dto.claim_id);
+    if (!record) {
+      throw new NotFoundException(`Claim ${dto.claim_id} not found`);
+    }
+    if (record.ops_approved) {
+      throw new ConflictException(`Claim ${dto.claim_id} is already approved for settlement`);
+    }
+    if (record.decision === 'PENDING') {
+      throw new ConflictException(
+        'Cannot approve a claim that stopped at document validation. Resolve issues first.',
+      );
+    }
+
+    const updated = await this.claimsRepository.markOpsApproved(dto.claim_id, dto.ops_note);
+    if (!updated) {
+      throw new NotFoundException(`Claim ${dto.claim_id} not found`);
+    }
+
+    return this.getClaimById(dto.claim_id);
+  }
+
+  async getClaimHistory(decision?: string, limit?: number, caseId?: string) {
+    const records = await this.claimsRepository.findHistory({ decision, limit, case_id: caseId });
     return records.map((record) => ({
+      id: String(record._id),
       claim_id: record.claim_id,
       member_id: record.member_id,
       policy_id: record.policy_id,
@@ -151,17 +198,22 @@ ${contextJson}`;
       reason: record.reason,
       confidence_score: record.confidence_score,
       submitted_at: record.submitted_at?.toISOString?.() ?? record.submitted_at,
+      ops_approved: Boolean(record.ops_approved),
+      case_id: record.case_id ?? undefined,
       documents: (record.submission as { documents?: unknown[] })?.documents ?? [],
     }));
   }
 
-  async getClaimById(claimId: string) {
-    const record = await this.claimsRepository.findByClaimId(claimId);
+  async getClaimById(claimIdOrRecordId: string) {
+    const record =
+      (await this.claimsRepository.findByRecordId(claimIdOrRecordId)) ??
+      (await this.claimsRepository.findByClaimId(claimIdOrRecordId));
     if (!record) {
-      throw new NotFoundException(`Claim ${claimId} not found`);
+      throw new NotFoundException(`Claim ${claimIdOrRecordId} not found`);
     }
 
     return {
+      id: String(record._id),
       claim_id: record.claim_id,
       decision: record.decision,
       approved_amount: record.approved_amount,
@@ -172,12 +224,32 @@ ${contextJson}`;
       line_item_decisions: record.line_item_decisions,
       financial_breakdown: record.financial_breakdown,
       submission: record.submission,
+      member_note: record.member_note,
+      ops_approved: Boolean(record.ops_approved),
+      ops_approved_at: record.ops_approved_at?.toISOString?.() ?? record.ops_approved_at,
+      ops_approval_note: record.ops_approval_note,
+      case_id: record.case_id ?? undefined,
       submitted_at: record.submitted_at?.toISOString?.() ?? record.submitted_at,
     };
   }
 
   private mapLangGraphOutput(result: unknown): AdjudicationResult {
     const data = this.extractAdjudicationState(result);
+    const policyResult = data.policy_result as Record<string, unknown> | undefined;
+    const trace = (data.execution_trace as Array<{ details?: Record<string, unknown> }>) ?? [];
+    const decisionTrace = [...trace].reverse().find((e) => e.details?.financial_breakdown != null);
+
+    const lineItemDecisions =
+      (data.line_item_decisions as unknown[]) ??
+      (policyResult?.line_item_decisions as unknown[]) ??
+      (decisionTrace?.details?.line_item_decisions as unknown[]) ??
+      [];
+
+    const financialBreakdown =
+      (data.financial_breakdown as Record<string, unknown>) ??
+      (policyResult?.financial_breakdown as Record<string, unknown>) ??
+      (decisionTrace?.details?.financial_breakdown as Record<string, unknown>) ??
+      {};
 
     return {
       claim_id: String(data.claim_id ?? 'UNKNOWN'),
@@ -185,10 +257,10 @@ ${contextJson}`;
       approved_amount: Number(data.approved_amount ?? 0),
       reason: String(data.reason ?? ''),
       confidence_score: Number(data.confidence_score ?? 1),
-      execution_trace: (data.execution_trace as unknown[]) ?? [],
+      execution_trace: trace,
       rejection_reasons: (data.rejection_reasons as unknown[]) ?? [],
-      line_item_decisions: (data.line_item_decisions as unknown[]) ?? [],
-      financial_breakdown: (data.financial_breakdown as Record<string, unknown>) ?? {},
+      line_item_decisions: lineItemDecisions,
+      financial_breakdown: financialBreakdown,
     };
   }
 

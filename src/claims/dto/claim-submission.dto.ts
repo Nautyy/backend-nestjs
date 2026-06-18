@@ -1,4 +1,4 @@
-import { IsArray, IsNumber, IsOptional, IsString, ValidateNested } from 'class-validator';
+import { IsArray, IsBoolean, IsNumber, IsOptional, IsString, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class ClaimDocumentDto {
@@ -28,6 +28,14 @@ export class ClaimDocumentDto {
   @IsOptional()
   @IsString()
   content_source?: string;
+
+  @IsOptional()
+  @IsString()
+  patient_name_on_doc?: string;
+
+  @IsOptional()
+  @IsString()
+  quality?: string;
 }
 
 export class ClaimHistoryDto {
@@ -83,4 +91,22 @@ export class ClaimSubmissionDto {
   @IsOptional()
   @IsString()
   pre_authorization_id?: string;
+
+  /** SELF | SPOUSE | CHILD | PARENT — who the claim is for */
+  @IsOptional()
+  @IsString()
+  claim_for?: string;
+
+  @IsOptional()
+  @IsString()
+  patient_name?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  simulate_component_failure?: boolean;
+
+  /** Scenario id when submitting from assignment / OCR test lab */
+  @IsOptional()
+  @IsString()
+  case_id?: string;
 }

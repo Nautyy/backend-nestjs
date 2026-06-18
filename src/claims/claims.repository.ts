@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import { ClaimSubmissionDto } from './dto/claim-submission.dto';
 import { ClaimRecord, ClaimRecordDocument } from './schemas/claim-record.schema';
 
@@ -33,7 +33,11 @@ export class ClaimsRepository {
     private readonly claimModel: Model<ClaimRecordDocument>,
   ) {}
 
-  async saveClaim(submission: ClaimSubmissionDto, result: AdjudicationResult) {
+  async saveClaim(
+    submission: ClaimSubmissionDto,
+    result: AdjudicationResult,
+    memberNote?: string,
+  ) {
     const record = new this.claimModel({
       claim_id: String(result.claim_id),
       member_id: submission.member_id,
@@ -50,27 +54,54 @@ export class ClaimsRepository {
       rejection_reasons: result.rejection_reasons ?? [],
       line_item_decisions: result.line_item_decisions ?? [],
       financial_breakdown: result.financial_breakdown ?? {},
+      ops_approved: false,
+      ...(submission.case_id?.trim() ? { case_id: submission.case_id.trim() } : {}),
+      ...(memberNote?.trim() ? { member_note: memberNote.trim() } : {}),
     });
 
     return record.save();
   }
 
-  async findHistory(options: { decision?: string; limit?: number }) {
+  async findHistory(options: { decision?: string; limit?: number; case_id?: string }) {
     const limit = Math.min(options.limit ?? 50, 100);
-    const filter = options.decision ? { decision: options.decision } : {};
+    const filter: Record<string, unknown> = {};
+    if (options.decision) filter.decision = options.decision;
+    if (options.case_id) filter.case_id = options.case_id;
 
     return this.claimModel
       .find(filter)
       .sort({ submitted_at: -1 })
       .limit(limit)
       .select(
-        'claim_id member_id policy_id claim_category claimed_amount approved_amount decision reason confidence_score submitted_at submission.documents',
+        'claim_id member_id policy_id claim_category claimed_amount approved_amount decision reason confidence_score submitted_at ops_approved case_id submission.documents',
       )
       .lean()
       .exec();
   }
 
   async findByClaimId(claimId: string) {
-    return this.claimModel.findOne({ claim_id: claimId }).lean().exec();
+    return this.claimModel.findOne({ claim_id: claimId }).sort({ submitted_at: -1 }).lean().exec();
+  }
+
+  async findByRecordId(recordId: string) {
+    if (!Types.ObjectId.isValid(recordId)) {
+      return null;
+    }
+    return this.claimModel.findById(new Types.ObjectId(recordId)).lean().exec();
+  }
+
+  async markOpsApproved(claimId: string, opsNote?: string) {
+    const update: Record<string, unknown> = {
+      ops_approved: true,
+      ops_approved_at: new Date(),
+    };
+    if (opsNote?.trim()) {
+      update.ops_approval_note = opsNote.trim();
+    }
+
+    return this.claimModel
+      .findOneAndUpdate({ claim_id: claimId }, { $set: update }, { new: true })
+      .lean()
+      .exec();
   }
 }
